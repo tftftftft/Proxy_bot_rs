@@ -1,0 +1,21 @@
+[package]
+name = "bot"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio = { version = "1.29.1", features = ["full"] }
+hyper = { version = "0.14.27", features = ["full"] }
+log = "0.4.19"
+env_logger = "0.10.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
+
+[profile.release]
+opt-level = "z"     # Optimize for size.
+lto = true          # Enable Link Time Optimization
+codegen-units = 1   # Reduce number of codegen units to increase optimizations.
+panic = "abort"     # Abort on panic
+strip = true        # Automatically strip symbols from the binary.
