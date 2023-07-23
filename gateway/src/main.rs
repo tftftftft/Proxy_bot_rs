@@ -1,26 +1,35 @@
 use hyper::{
-    body::to_bytes,
+    body::{to_bytes, Bytes},
+    client::Client,
     service::{make_service_fn, service_fn},
-    Body, Request, Response, Server, StatusCode,
+    Body, Request, Response, Server,
 };
 use log::info;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    convert::Infallible,
     net::SocketAddr,
     sync::{Arc, Mutex},
+    time::{Duration, SystemTime},
 };
+use tokio::time::interval;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct BotData {
     ip: String,
     version: String,
+    bot_port: u16,
+}
+
+#[derive(Debug)]
+struct ServerBotData {
+    bot_data: BotData,
+    last_communication: SystemTime,
 }
 
 struct Bots {
-    bots: Mutex<HashMap<String, BotData>>,
-    max_id: Mutex<i32>, // Keep track of the maximum ID used so far
+    bots: Mutex<HashMap<u16, ServerBotData>>,
+    max_id: Mutex<u16>, // Keep track of the maximum ID used so far
 }
 
 impl Bots {
@@ -32,34 +41,115 @@ impl Bots {
     }
 }
 
-async fn handle(bots: Arc<Bots>, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
-    info!("Received request: {:?}", req);
+async fn handle_registration(
+    bots: Arc<Bots>,
+    req: Request<Body>,
+) -> Result<Response<Body>, hyper::Error> {
+    info!("Received registration request: {:?}", req);
 
-    let bytes = to_bytes(req).await?;
+    let bytes = to_bytes(req.into_body()).await?;
     let bot_data: BotData = serde_json::from_slice(&bytes).unwrap();
 
-    let mut bots_lock = bots.bots.lock().unwrap();
+    let response = if bot_exists(&bots, &bot_data) {
+        Response::new(Body::from("Bot with this IP already exists."))
+    } else {
+        let id = assign_bot_id(&bots);
+        let response_body = format!("Assigned ID: {}", id);
+        spawn_bot_server(id, bot_data.clone(), bots.clone());
+
+        // Update last communication time for the newly registered bot
+        let mut bots_lock = bots.bots.lock().unwrap();
+        bots_lock.insert(
+            id,
+            ServerBotData {
+                bot_data: bot_data,
+                last_communication: SystemTime::now(),
+            },
+        );
+
+        Response::new(Body::from(response_body))
+    };
+
+    Ok(response)
+}
+
+fn bot_exists(bots: &Arc<Bots>, bot_data: &BotData) -> bool {
+    let bots_lock = bots.bots.lock().unwrap();
+    bots_lock.values().any(|v| v.bot_data.ip == bot_data.ip)
+}
+
+fn assign_bot_id(bots: &Arc<Bots>) -> u16 {
     let mut id_lock = bots.max_id.lock().unwrap();
-    *id_lock += 1; // Increment the ID for each new bot
-    let id = id_lock.to_string(); // Convert to string for use as a HashMap key
+    *id_lock += 1;
+    *id_lock
+}
 
-    bots_lock.insert(id.clone(), bot_data);
+fn spawn_bot_server(id: u16, bot_data: BotData, bots: Arc<Bots>) {
+    let bot_port = 5000 + id;
+    tokio::spawn(start_bot_server(id, bot_data.clone(), bots, bot_port));
+}
 
-    // Log the current list of bots using info!
-    info!("Current list of bots: {:?}", *bots_lock);
+async fn start_bot_server(id: u16, bot_data: BotData, bots: Arc<Bots>, bot_port: u16) {
+    let addr = SocketAddr::from(([127, 0, 0, 1], bot_port));
 
-    Ok(Response::new(Body::from(format!("Assigned ID: {}", id))))
+    let make_service = make_service_fn(move |_| {
+        let id = id;
+        let bot_data = bot_data.clone();
+        let bots = bots.clone();
+        async move {
+            Ok::<_, hyper::Error>(service_fn(move |req| {
+                forward_request_to_bot(id, bot_data.clone(), req, bots.clone())
+            }))
+        }
+    });
+
+    let server = Server::bind(&addr).serve(make_service);
+
+    if let Err(e) = server.await {
+        eprintln!("Bot server error: {}", e);
+    }
+}
+
+async fn forward_request_to_bot(
+    id: u16,
+    bot_data: BotData,
+    req: Request<Body>,
+    bots: Arc<Bots>,
+) -> Result<Response<Body>, hyper::Error> {
+    info!("{:?}", req);
+    let client = Client::new();
+    let bot_port = 5000 + id;
+    let bot_addr = SocketAddr::new(bot_data.ip.parse().unwrap(), bot_port);
+    let req = Request::builder()
+        .method(req.method().clone())
+        .uri(format!("http://{}", bot_addr))
+        .body(Body::from(Bytes::copy_from_slice(
+            &to_bytes(req.into_body()).await.unwrap(),
+        )))
+        .unwrap();
+    let response = client.request(req).await.unwrap();
+    Ok(response)
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     env_logger::init();
-    let addr = SocketAddr::from(([127, 0, 0, 1], 1111));
+    let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
     let bots = Arc::new(Bots::new());
-    let mut current_bot_id = 0;
+
+    // Start the cleanup task
+    let bots_for_cleanup = bots.clone();
+    tokio::spawn(async move {
+        cleanup_bots(bots_for_cleanup).await;
+    });
+
     let make_service = make_service_fn(move |_| {
         let bots = bots.clone();
-        async { Ok::<_, Infallible>(service_fn(move |req| handle(bots.clone(), req))) }
+        async {
+            Ok::<_, hyper::Error>(service_fn(move |req| {
+                handle_registration(bots.clone(), req)
+            }))
+        }
     });
 
     let server = Server::bind(&addr).serve(make_service);
@@ -70,4 +160,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     Ok(())
+}
+
+async fn cleanup_bots(bots: Arc<Bots>) {
+    let mut interval = interval(Duration::from_secs(10));
+    loop {
+        interval.tick().await;
+        let mut bots_lock = bots.bots.lock().unwrap();
+        bots_lock.retain(|_, v| {
+            v.last_communication
+                .elapsed()
+                .unwrap_or(Duration::new(0, 0))
+                < Duration::from_secs(60)
+        });
+
+        for (id, bot) in bots_lock.iter() {
+            let bot_port = 5000 + *id;
+            info!(
+                "Bot ID: {}, IP: {}, Port: {}",
+                id, bot.bot_data.ip, bot_port
+            );
+        }
+    }
 }
