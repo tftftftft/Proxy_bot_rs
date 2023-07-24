@@ -86,7 +86,7 @@ fn assign_bot_id(bots: &Arc<Bots>) -> u16 {
 
 fn spawn_bot_server(id: u16, bot_data: BotData, bots: Arc<Bots>) {
     let bot_port = 5000 + id;
-    tokio::spawn(start_bot_server(id, bot_data.clone(), bots, bot_port));
+    tokio::spawn(start_bot_server(id, bot_data, bots, bot_port));
 }
 
 async fn start_bot_server(id: u16, bot_data: BotData, bots: Arc<Bots>, bot_port: u16) {
@@ -118,8 +118,8 @@ async fn forward_request_to_bot(
 ) -> Result<Response<Body>, hyper::Error> {
     info!("{:?}", req);
     let client = Client::new();
-    let bot_port = 5000 + id;
-    let bot_addr = SocketAddr::new(bot_data.ip.parse().unwrap(), bot_port);
+    info!("{:?}", bot_data.bot_port);
+    let bot_addr = SocketAddr::new(bot_data.ip.parse().unwrap(), bot_data.bot_port);
     let req = Request::builder()
         .method(req.method().clone())
         .uri(format!("http://{}", bot_addr))

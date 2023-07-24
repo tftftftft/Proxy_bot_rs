@@ -24,6 +24,32 @@ struct BotData {
 async fn handle(req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
     let client = Client::new();
     info!("Received request: {:?}", req);
+
+    // Get a mutable reference to the parts of the incoming request.
+    let (mut parts, body) = req.into_parts();
+
+    // Get the incoming request's URI.
+    let uri = parts.uri.clone();
+
+    // Parse the target authority from the incoming request's URI.
+    // Note: You might want to add error handling here in case the incoming request's URI
+    // does not contain a valid authority.
+    let target_authority = uri.authority().unwrap().clone();
+
+    // Create a new URI with the target authority.
+    let new_uri = Uri::builder()
+        .scheme(uri.scheme().unwrap().clone())
+        .authority(target_authority.as_str())
+        .path_and_query(uri.path_and_query().unwrap().clone())
+        .build()
+        .unwrap();
+
+    // Set the modified URI.
+    parts.uri = new_uri;
+
+    // Create a new request with the modified URI.
+    let req = Request::from_parts(parts, body);
+
     let resp = client.request(req).await;
     info!("Response: {:?}", resp);
     resp
