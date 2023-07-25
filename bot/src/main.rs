@@ -63,7 +63,6 @@ async fn get_ip() -> Result<String, Error> {
 
     Ok(body_string.trim().to_string())
 }
-
 async fn send_data_to_master(
     master_addr: SocketAddr,
     uuid: String,
@@ -107,7 +106,7 @@ async fn send_heartbeat_to_master(master_addr: SocketAddr, uuid: String) {
             Err(e) => error!("Error while sending heartbeat: {}", e),
         }
         info!("Going to sleep before next heartbeat...");
-        tokio::time::sleep(tokio::time::Duration::from_secs(20)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
     }
 }
 
@@ -127,7 +126,7 @@ async fn main() {
 
     info!("Logger is initialized");
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+    let addr: SocketAddr = SocketAddr::from(([0, 0, 0, 0], 3000));
     let uuid = create_uuid().await;
     let make_service = make_service_fn(|_| async { Ok::<_, Infallible>(service_fn(handle)) });
     let server = Server::bind(&addr).serve(make_service);
