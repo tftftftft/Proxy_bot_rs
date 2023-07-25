@@ -2,13 +2,14 @@ use hyper::{
     body::{to_bytes, Bytes},
     client::Client,
     service::{make_service_fn, service_fn},
-    Body, Request, Response, Server,
+    Body, Request, Response, Server, Uri,
 };
-use log::info;
+use log::{error, info};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     net::SocketAddr,
+    str::FromStr,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
@@ -19,6 +20,7 @@ struct BotData {
     ip: String,
     version: String,
     bot_port: u16,
+    uuid: String,
 }
 
 #[derive(Debug)]
@@ -50,32 +52,34 @@ async fn handle_registration(
     let bytes = to_bytes(req.into_body()).await?;
     let bot_data: BotData = serde_json::from_slice(&bytes).unwrap();
 
-    let response = if bot_exists(&bots, &bot_data) {
-        Response::new(Body::from("Bot with this IP already exists."))
-    } else {
-        let id = assign_bot_id(&bots);
-        let response_body = format!("Assigned ID: {}", id);
-        spawn_bot_server(id, bot_data.clone(), bots.clone());
+    // If bot already exists, return early with a response
+    if bot_exists(&bots, &bot_data) {
+        return Ok(Response::new(Body::from(
+            "Bot with this UUID already exists.",
+        )));
+    }
 
-        // Update last communication time for the newly registered bot
-        let mut bots_lock = bots.bots.lock().unwrap();
-        bots_lock.insert(
-            id,
-            ServerBotData {
-                bot_data: bot_data,
-                last_communication: SystemTime::now(),
-            },
-        );
+    let id = assign_bot_id(&bots);
+    let response_body = format!("Assigned ID: {}", id);
+    spawn_bot_server(id, bot_data.clone(), bots.clone());
 
-        Response::new(Body::from(response_body))
-    };
+    // Update last communication time for the newly registered bot
+    let mut bots_lock = bots.bots.lock().unwrap();
+    bots_lock.insert(
+        id,
+        ServerBotData {
+            bot_data: bot_data,
+            last_communication: SystemTime::now(),
+        },
+    );
+
+    let response = Response::new(Body::from(response_body));
 
     Ok(response)
 }
-
 fn bot_exists(bots: &Arc<Bots>, bot_data: &BotData) -> bool {
     let bots_lock = bots.bots.lock().unwrap();
-    bots_lock.values().any(|v| v.bot_data.ip == bot_data.ip)
+    bots_lock.values().any(|v| v.bot_data.uuid == bot_data.uuid)
 }
 
 fn assign_bot_id(bots: &Arc<Bots>) -> u16 {
@@ -86,19 +90,17 @@ fn assign_bot_id(bots: &Arc<Bots>) -> u16 {
 
 fn spawn_bot_server(id: u16, bot_data: BotData, bots: Arc<Bots>) {
     let bot_port = 5000 + id;
-    tokio::spawn(start_bot_server(id, bot_data, bots, bot_port));
+    tokio::spawn(start_bot_server(bot_data, bot_port));
 }
 
-async fn start_bot_server(id: u16, bot_data: BotData, bots: Arc<Bots>, bot_port: u16) {
+async fn start_bot_server(bot_data: BotData, bot_port: u16) {
     let addr = SocketAddr::from(([127, 0, 0, 1], bot_port));
 
     let make_service = make_service_fn(move |_| {
-        let id = id;
         let bot_data = bot_data.clone();
-        let bots = bots.clone();
         async move {
             Ok::<_, hyper::Error>(service_fn(move |req| {
-                forward_request_to_bot(id, bot_data.clone(), req, bots.clone())
+                forward_request_to_bot(bot_data.clone(), req)
             }))
         }
     });
@@ -111,26 +113,28 @@ async fn start_bot_server(id: u16, bot_data: BotData, bots: Arc<Bots>, bot_port:
 }
 
 async fn forward_request_to_bot(
-    id: u16,
     bot_data: BotData,
     req: Request<Body>,
-    bots: Arc<Bots>,
 ) -> Result<Response<Body>, hyper::Error> {
     info!("{:?}", req);
     let client = Client::new();
-    info!("{:?}", bot_data.bot_port);
-    let bot_addr = SocketAddr::new(bot_data.ip.parse().unwrap(), bot_data.bot_port);
-    let req = Request::builder()
-        .method(req.method().clone())
-        .uri(format!("http://{}", bot_addr))
-        .body(Body::from(Bytes::copy_from_slice(
-            &to_bytes(req.into_body()).await.unwrap(),
-        )))
-        .unwrap();
-    let response = client.request(req).await.unwrap();
+
+    let uri_str = format!("http://127.0.0.1:{}", bot_data.bot_port); //debugging
+                                                                     // let uri_str = format!("http://{}:{}", bot_data.ip, bot_data.bot_port);
+    info!(
+        "bot ip: {:?}, bot port sending info to: {:?}",
+        bot_data.ip, bot_data.bot_port
+    );
+    let uri = Uri::from_str(&uri_str).unwrap();
+
+    // Clone the request and modify the URI.
+    let (parts, body) = req.into_parts();
+    let mut new_req = Request::from_parts(parts, body);
+    *new_req.uri_mut() = uri;
+
+    let response = client.request(new_req).await.unwrap();
     Ok(response)
 }
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     env_logger::init();
@@ -167,12 +171,17 @@ async fn cleanup_bots(bots: Arc<Bots>) {
     loop {
         interval.tick().await;
         let mut bots_lock = bots.bots.lock().unwrap();
+        info!("Bots before cleanup: {:?}", bots_lock); // added logging
+
         bots_lock.retain(|_, v| {
-            v.last_communication
+            let elapsed = v
+                .last_communication
                 .elapsed()
-                .unwrap_or(Duration::new(0, 0))
-                < Duration::from_secs(60)
+                .unwrap_or(Duration::new(0, 0));
+            elapsed < Duration::from_secs(30)
         });
+
+        info!("Bots after cleanup: {:?}", bots_lock); // added logging
 
         for (id, bot) in bots_lock.iter() {
             let bot_port = 5000 + *id;

@@ -1,7 +1,4 @@
 use hyper::{
-    body::Bytes,
-    client,
-    header::HOST,
     http::Error,
     service::{make_service_fn, service_fn},
     Body, Client, Request, Response, Server, StatusCode, Uri,
@@ -9,6 +6,7 @@ use hyper::{
 use log::{error, info};
 use serde::{Deserialize, Serialize};
 use std::{convert::Infallible, net::SocketAddr, str::FromStr};
+use uuid::Uuid;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct BotData {
@@ -18,43 +16,34 @@ struct BotData {
     // name: String,
     version: String,
     bot_port: u16,
-    // other_info: String,
+    uuid: String, // other_info: String,
 }
 
 async fn handle(req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
     let client = Client::new();
     info!("Received request: {:?}", req);
 
-    // Get a mutable reference to the parts of the incoming request.
-    let (mut parts, body) = req.into_parts();
+    // Create a new URI. Replace with target URL.
+    let new_uri: hyper::Uri = "http://example.com".parse().unwrap();
 
-    // Get the incoming request's URI.
-    let uri = parts.uri.clone();
+    // Clone the headers from the original request
+    let headers = req.headers().clone();
 
-    // Parse the target authority from the incoming request's URI.
-    // Note: You might want to add error handling here in case the incoming request's URI
-    // does not contain a valid authority.
-    let target_authority = uri.authority().unwrap().clone();
-
-    // Create a new URI with the target authority.
-    let new_uri = Uri::builder()
-        .scheme(uri.scheme().unwrap().clone())
-        .authority(target_authority.as_str())
-        .path_and_query(uri.path_and_query().unwrap().clone())
-        .build()
+    // Begin building the new request to be forwarded
+    let mut forward_req = Request::builder()
+        .method(req.method().clone())
+        .uri(new_uri)
+        .version(req.version())
+        .body(req.into_body())
         .unwrap();
 
-    // Set the modified URI.
-    parts.uri = new_uri;
+    // Append the headers to the new request
+    *forward_req.headers_mut() = headers;
 
-    // Create a new request with the modified URI.
-    let req = Request::from_parts(parts, body);
-
-    let resp = client.request(req).await;
+    let resp = client.request(forward_req).await;
     info!("Response: {:?}", resp);
     resp
 }
-
 async fn get_ip() -> Result<String, Error> {
     let target_url: Uri = Uri::from_str("http://myexternalip.com/raw").unwrap();
     let client = Client::new();
@@ -75,18 +64,21 @@ async fn get_ip() -> Result<String, Error> {
     Ok(body_string.trim().to_string())
 }
 
-async fn send_data_to_master(master_addr: SocketAddr) -> Result<StatusCode, hyper::Error> {
+async fn send_data_to_master(
+    master_addr: SocketAddr,
+    uuid: String,
+) -> Result<StatusCode, hyper::Error> {
     let target_url: Uri = Uri::from_str(&format!("http://{}", master_addr)).unwrap();
     let client = Client::new();
 
     // Get the external IP
     let external_ip = get_ip().await.unwrap();
-
     // Create a BotData instance with the external IP
     let bot_data = BotData {
         ip: external_ip,
         version: "1.0".to_string(),
         bot_port: 3000,
+        uuid,
     };
 
     // Serialize the BotData to JSON
@@ -105,17 +97,24 @@ async fn send_data_to_master(master_addr: SocketAddr) -> Result<StatusCode, hype
     Ok(response.status())
 }
 
-async fn send_heartbeat_to_master(master_addr: SocketAddr) {
+async fn send_heartbeat_to_master(master_addr: SocketAddr, uuid: String) {
     info!("Starting to send heartbeats...");
     loop {
+        let uuid = uuid.clone();
         info!("Starting a new heartbeat iteration...");
-        match send_data_to_master(master_addr).await {
+        match send_data_to_master(master_addr, uuid).await {
             Ok(status) => info!("Heartbeat sent to master. Status: {}", status),
             Err(e) => error!("Error while sending heartbeat: {}", e),
         }
         info!("Going to sleep before next heartbeat...");
         tokio::time::sleep(tokio::time::Duration::from_secs(20)).await;
     }
+}
+
+async fn create_uuid() -> String {
+    let uuid = Uuid::new_v4();
+    info!("uuid: {:?}", uuid);
+    uuid.to_string()
 }
 
 #[tokio::main]
@@ -129,14 +128,14 @@ async fn main() {
     info!("Logger is initialized");
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
-
+    let uuid = create_uuid().await;
     let make_service = make_service_fn(|_| async { Ok::<_, Infallible>(service_fn(handle)) });
     let server = Server::bind(&addr).serve(make_service);
     info!("Server is running on {}", addr);
 
     // Spawn a separate task to send heartbeats to the master server.
     let master_addr = SocketAddr::from(([127, 0, 0, 1], 8080));
-    let heartbeat_task = tokio::spawn(send_heartbeat_to_master(master_addr));
+    let heartbeat_task = tokio::spawn(send_heartbeat_to_master(master_addr, uuid));
 
     let server_task = tokio::spawn(async move {
         if let Err(e) = server.await {
