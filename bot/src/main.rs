@@ -22,9 +22,14 @@ struct BotData {
 async fn handle(req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
     let client = Client::new();
     info!("Received request: {:?}", req);
+    let host_header_value = req.headers().get("host").unwrap(); // Get the header value
+    let host_str = std::str::from_utf8(host_header_value.as_ref()).unwrap(); // Convert it to a str
+                                                                             // You now have a str and can use it in your format string
+    let new_uri = format!("http://{}{}", host_str, req.uri());
+    info!("Mine Uri {}", new_uri);
 
-    // Create a new URI. Replace with target URL.
-    let new_uri: hyper::Uri = "http://example.com".parse().unwrap();
+    let new_uri_working: hyper::Uri = "http://example.com".parse().unwrap();
+    info!("OLD Uri {}", new_uri_working);
 
     // Clone the headers from the original request
     let headers = req.headers().clone();
@@ -39,7 +44,7 @@ async fn handle(req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
 
     // Append the headers to the new request
     *forward_req.headers_mut() = headers;
-
+    info!("Request: {:?}", forward_req);
     let resp = client.request(forward_req).await;
     info!("Response: {:?}", resp);
     resp
