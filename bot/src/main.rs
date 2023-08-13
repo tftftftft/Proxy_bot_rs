@@ -10,13 +10,10 @@ use uuid::Uuid;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct BotData {
-    ip: String,
-    // Add other fields representing your bot data here
-    // For example:
-    // name: String,
+    ip: String,,
     version: String,
     bot_port: u16,
-    uuid: String, // other_info: String,
+    uuid: String,
 }
 
 async fn handle(req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
@@ -24,8 +21,8 @@ async fn handle(req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
     info!("Received request: {:?}", req);
     let host_header_value = req.headers().get("host").unwrap(); // Get the header value
     let host_str = std::str::from_utf8(host_header_value.as_ref()).unwrap(); // Convert it to a str
-                                                                             // You now have a str and can use it in your format string
-    let new_uri = format!("http://{}{}", host_str, req.uri()); // You now have a str and can use it in your format string
+                                                                        
+    let new_uri = format!("http://{}{}", host_str, req.uri()); 
 
     info!("Mine Uri {}", new_uri);
 
